@@ -1,13 +1,13 @@
 #!/bin/bash
 
-echo "🔧 Seal Web App - Backend Setup Script"
+echo "🔧 Seal Web App - Setup Script"
 echo "======================================"
 
 # Check if yt-dlp is installed
 if ! command -v yt-dlp &> /dev/null; then
     echo "❌ yt-dlp is not installed."
     echo "📦 Installing yt-dlp..."
-    
+
     # Try different installation methods
     if command -v apt &> /dev/null; then
         echo "🐧 Detected Ubuntu/Debian - using apt"
@@ -35,7 +35,7 @@ echo "📋 yt-dlp version: $(yt-dlp --version)"
 # Install Node.js dependencies
 echo "📦 Installing Node.js dependencies..."
 if npm install; then
-    echo "✅ Backend dependencies installed successfully"
+    echo "✅ Dependencies installed successfully"
 else
     echo "❌ Failed to install dependencies. Check your network connection."
     exit 1
@@ -45,12 +45,17 @@ fi
 mkdir -p downloads
 echo "📁 Created downloads directory"
 
+# Create .env from the example template if it doesn't exist yet
+if [ ! -f .env ]; then
+    cp .env.example .env
+    echo "📝 Created .env from .env.example"
+fi
+
 echo ""
-echo "🎉 Setup complete! You can now start the full application:"
+echo "🎉 Setup complete! You can now start the API server:"
 echo "   npm run dev"
 echo ""
-echo "🌐 The app will be available at:"
-echo "   Frontend: http://localhost:3000"
-echo "   Backend:  http://localhost:5000"
+echo "🌐 The API will be available at:"
+echo "   http://localhost:5000"
 echo ""
 echo "🚀 Happy downloading!"

@@ -14,9 +14,19 @@ const {
   safeFilename
 } = require('../lib/directLink');
 const { resolveDirectLinkFormat } = require('../lib/formatResolution');
+const {
+  isB2Enabled,
+  uploadFile: uploadToB2,
+  listFiles: listB2Files,
+  deleteFile: deleteB2File
+} = require('../lib/storage');
 const router = express.Router();
 
 const DIRECT_LINK_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36';
+
+const DOWNLOADS_DIR = process.env.DOWNLOADS_DIR
+  ? path.resolve(process.env.DOWNLOADS_DIR)
+  : path.join(__dirname, '../../downloads');
 
 const DEFAULT_NOTE = 'Provider URLs may expire.';
 // TikTok's CDN edge (Varnish) rejects the resolved video URL - 403 / internal
@@ -241,7 +251,7 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL format. Please provide a valid HTTP/HTTPS URL.' });
     }
 
-    const downloadsDir = path.join(__dirname, '../../downloads');
+    const downloadsDir = DOWNLOADS_DIR;
     await fs.ensureDir(downloadsDir);
 
     // Build yt-dlp command with better YouTube handling
@@ -303,10 +313,19 @@ router.post('/', async (req, res) => {
         io.emit('download-progress', downloadInfo);
       }
       
-      // Extract filename
+      // Extract filename. A merged video+audio download (see the -f
+      // selector above) writes temp component files first - each logs its
+      // own "[download] Destination:" line - then merges them into the
+      // final file via ffmpeg, logged separately. Prefer the merge target
+      // when present so downloadInfo.filename ends up naming the final
+      // file, not a temp component that gets deleted after merging.
       const filenameMatch = output.match(/\[download\] Destination: (.+)/);
       if (filenameMatch) {
         downloadInfo.filename = path.basename(filenameMatch[1]);
+      }
+      const mergedFilenameMatch = output.match(/\[Merger\] Merging formats into "(.+)"/);
+      if (mergedFilenameMatch) {
+        downloadInfo.filename = path.basename(mergedFilenameMatch[1]);
       }
     });
 
@@ -318,16 +337,39 @@ router.post('/', async (req, res) => {
       io.emit('download-error', downloadInfo);
     });
 
-    ytdlp.on('close', (code) => {
-      if (code === 0) {
-        downloadInfo.status = 'completed';
-        downloadInfo.progress = 100;
-        io.emit('download-complete', downloadInfo);
-      } else {
+    ytdlp.on('close', async (code) => {
+      if (code !== 0) {
         downloadInfo.status = 'error';
         downloadInfo.error = `Process exited with code ${code}`;
         io.emit('download-error', downloadInfo);
+        return;
       }
+
+      downloadInfo.status = 'completed';
+      downloadInfo.progress = 100;
+
+      // yt-dlp always writes to local disk first (it has no B2-aware output
+      // mode); when B2 is configured, upload the finished file there and
+      // remove the local copy so B2 is the only place it ends up living -
+      // local disk is a staging area in that case, not a second copy.
+      if (isB2Enabled() && downloadInfo.filename) {
+        const localFilePath = path.join(downloadsDir, downloadInfo.filename);
+        try {
+          await uploadToB2(localFilePath, downloadInfo.filename);
+          await fs.remove(localFilePath);
+          downloadInfo.storage = 'b2';
+        } catch (uploadError) {
+          console.error('B2 upload error:', uploadError);
+          downloadInfo.status = 'error';
+          downloadInfo.error = `Download completed but failed to upload to B2: ${uploadError.message}`;
+          io.emit('download-error', downloadInfo);
+          return;
+        }
+      } else {
+        downloadInfo.storage = 'local';
+      }
+
+      io.emit('download-complete', downloadInfo);
     });
 
     res.json({
@@ -348,9 +390,14 @@ router.post('/', async (req, res) => {
 // GET /api/download/list - List downloaded files
 router.get('/list', async (req, res) => {
   try {
-    const downloadsDir = path.join(__dirname, '../../downloads');
+    if (isB2Enabled()) {
+      const fileList = await listB2Files();
+      return res.json(fileList);
+    }
+
+    const downloadsDir = DOWNLOADS_DIR;
     const files = await fs.readdir(downloadsDir);
-    
+
     const fileList = await Promise.all(
       files.map(async (file) => {
         const filePath = path.join(downloadsDir, file);
@@ -375,10 +422,16 @@ router.get('/list', async (req, res) => {
 router.delete('/:filename', async (req, res) => {
   try {
     const { filename } = req.params;
-    const filePath = path.join(__dirname, '../../downloads', filename);
-    
+
+    if (isB2Enabled()) {
+      await deleteB2File(filename);
+      return res.json({ success: true, message: 'File deleted successfully' });
+    }
+
+    const filePath = path.join(DOWNLOADS_DIR, filename);
+
     // Security check - ensure file is in downloads directory
-    if (!filePath.startsWith(path.join(__dirname, '../../downloads'))) {
+    if (!filePath.startsWith(DOWNLOADS_DIR)) {
       return res.status(400).json({ error: 'Invalid file path' });
     }
 

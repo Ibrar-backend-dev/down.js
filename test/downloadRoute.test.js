@@ -15,6 +15,26 @@ childProcess.spawn = (...args) => {
   return mockImpl(...args);
 };
 
+// Same idea for the storage module: download.js destructures these at
+// require time, so the mock must replace the module's exports before that
+// happens. storageMock is null by default (real B2-disabled behavior).
+const storage = require('../server/lib/storage');
+let storageMock = null;
+const realIsB2Enabled = storage.isB2Enabled;
+storage.isB2Enabled = (...args) => (storageMock ? storageMock.isB2Enabled() : realIsB2Enabled(...args));
+storage.uploadFile = (...args) => {
+  if (!storageMock) throw new Error('No storage mock configured for this test');
+  return storageMock.uploadFile(...args);
+};
+storage.listFiles = (...args) => {
+  if (!storageMock) throw new Error('No storage mock configured for this test');
+  return storageMock.listFiles(...args);
+};
+storage.deleteFile = (...args) => {
+  if (!storageMock) throw new Error('No storage mock configured for this test');
+  return storageMock.deleteFile(...args);
+};
+
 const downloadRouter = require('../server/routes/download');
 
 function makeFakeProcess({ stdout = '', stderr = '', exitCode = 0, spawnError = null }) {
@@ -39,10 +59,12 @@ function makeFakeProbeProcess({ streams = [], exitCode = 0 }) {
   return makeFakeProcess({ stdout: JSON.stringify({ streams }), exitCode });
 }
 
+let socketEvents = [];
+
 async function startServer() {
   const app = express();
   app.use(express.json());
-  app.set('socketio', { emit: () => {} });
+  app.set('socketio', { emit: (event, info) => socketEvents.push({ event, info }) });
   app.use('/api/download', downloadRouter);
   const server = app.listen(0);
   await new Promise((resolve) => server.once('listening', resolve));
@@ -51,13 +73,25 @@ async function startServer() {
 }
 
 async function withServer(fn) {
+  socketEvents = [];
   const { server, baseUrl } = await startServer();
   try {
     await fn(baseUrl);
   } finally {
     mockImpl = null;
+    storageMock = null;
     await new Promise((resolve) => server.close(resolve));
   }
+}
+
+async function waitForSocketEvent(eventName, timeoutMs = 2000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const found = socketEvents.find((e) => e.event === eventName);
+    if (found) return found.info;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for socket event "${eventName}". Seen: ${socketEvents.map((e) => e.event).join(', ')}`);
 }
 
 test('GET /api/download/link rejects an invalid URL', async () => {
@@ -373,5 +407,122 @@ test('POST /api/download leaves the audioOnly selector unchanged', async () => {
     assert.equal(res.status, 200);
     assert.equal(seenArgs[seenArgs.indexOf('-f') + 1], 'bestaudio/best');
     assert.ok(!seenArgs.includes('--merge-output-format'));
+  });
+});
+
+test('POST /api/download captures the merged filename, not a deleted temp component', async () => {
+  mockImpl = () => makeFakeProcess({
+    stdout: [
+      '[download] Destination: This is a robbery.fhls-451.mp4',
+      '[download] Destination: This is a robbery.fdash-9.m4a',
+      '[Merger] Merging formats into "This is a robbery.mp4"',
+      'Deleting original file This is a robbery.fhls-451.mp4 (pass -k to keep)',
+      'Deleting original file This is a robbery.fdash-9.m4a (pass -k to keep)'
+    ].join('\n'),
+    exitCode: 0
+  });
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://www.reddit.com/r/funny/comments/1t5drxy/this_is_a_robbery/', quality: 'best' })
+    });
+    assert.equal(res.status, 200);
+
+    const info = await waitForSocketEvent('download-complete');
+    assert.equal(info.filename, 'This is a robbery.mp4');
+    assert.equal(info.storage, 'local');
+  });
+});
+
+test('POST /api/download uploads the finished file to B2 and removes the local copy when B2 is configured', async () => {
+  mockImpl = () => makeFakeProcess({
+    stdout: '[Merger] Merging formats into "Cool Video.mp4"',
+    exitCode: 0
+  });
+
+  let uploadCall = null;
+  storageMock = {
+    isB2Enabled: () => true,
+    uploadFile: async (localFilePath, key) => {
+      uploadCall = { localFilePath, key };
+      return { key, size: 123 };
+    },
+    listFiles: async () => { throw new Error('not used in this test'); },
+    deleteFile: async () => { throw new Error('not used in this test'); }
+  };
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://example.com/video', quality: 'best' })
+    });
+    assert.equal(res.status, 200);
+
+    const info = await waitForSocketEvent('download-complete');
+    assert.equal(info.storage, 'b2');
+    assert.equal(info.filename, 'Cool Video.mp4');
+    assert.equal(uploadCall.key, 'Cool Video.mp4');
+    assert.ok(uploadCall.localFilePath.endsWith('Cool Video.mp4'));
+  });
+});
+
+test('POST /api/download reports a download-error when the B2 upload fails, without pretending success', async () => {
+  mockImpl = () => makeFakeProcess({
+    stdout: '[Merger] Merging formats into "Cool Video.mp4"',
+    exitCode: 0
+  });
+
+  storageMock = {
+    isB2Enabled: () => true,
+    uploadFile: async () => { throw new Error('network error'); },
+    listFiles: async () => { throw new Error('not used in this test'); },
+    deleteFile: async () => { throw new Error('not used in this test'); }
+  };
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/download`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: 'https://example.com/video', quality: 'best' })
+    });
+    assert.equal(res.status, 200);
+
+    const info = await waitForSocketEvent('download-error');
+    assert.equal(info.status, 'error');
+    assert.match(info.error, /failed to upload to B2/);
+  });
+});
+
+test('GET /api/download/list lists from B2 instead of local disk when B2 is configured', async () => {
+  storageMock = {
+    isB2Enabled: () => true,
+    uploadFile: async () => { throw new Error('not used in this test'); },
+    listFiles: async () => [{ name: 'a.mp4', size: 1, createdAt: new Date(0), modifiedAt: new Date(0) }],
+    deleteFile: async () => { throw new Error('not used in this test'); }
+  };
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/download/list`);
+    assert.equal(res.status, 200);
+    assert.deepEqual((await res.json()).map((f) => f.name), ['a.mp4']);
+  });
+});
+
+test('DELETE /api/download/:filename deletes from B2 instead of local disk when B2 is configured', async () => {
+  let deletedKey = null;
+  storageMock = {
+    isB2Enabled: () => true,
+    uploadFile: async () => { throw new Error('not used in this test'); },
+    listFiles: async () => { throw new Error('not used in this test'); },
+    deleteFile: async (key) => { deletedKey = key; }
+  };
+
+  await withServer(async (baseUrl) => {
+    const res = await fetch(`${baseUrl}/api/download/${encodeURIComponent('a.mp4')}`, { method: 'DELETE' });
+    assert.equal(res.status, 200);
+    assert.equal(deletedKey, 'a.mp4');
   });
 });

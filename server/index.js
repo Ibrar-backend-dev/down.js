@@ -12,7 +12,7 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.NODE_ENV === 'production' ? false : ['http://localhost:3000'],
+    origin: process.env.SOCKET_CORS_ORIGIN || '*',
     methods: ['GET', 'POST']
   }
 });
@@ -26,13 +26,10 @@ app.use(morgan('combined'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Serve static files from React build in production
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../client/build')));
-}
-
 // Ensure downloads directory exists
-const downloadsDir = path.join(__dirname, '../downloads');
+const downloadsDir = process.env.DOWNLOADS_DIR
+  ? path.resolve(process.env.DOWNLOADS_DIR)
+  : path.join(__dirname, '../downloads');
 fs.ensureDirSync(downloadsDir);
 
 // Routes
@@ -51,13 +48,6 @@ io.on('connection', (socket) => {
 
 // Export io for use in routes
 app.set('socketio', io);
-
-// Serve React app in production
-if (process.env.NODE_ENV === 'production') {
-  app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, '../client/build/index.html'));
-  });
-}
 
 // Error handling middleware
 app.use((err, req, res, next) => {
