@@ -126,11 +126,11 @@ Run `yt-dlp --list-extractors` for yt-dlp's full site list.
 
 ## Deploying to Railway
 
-Railway's default Nixpacks builder only detects the Node app - it won't install yt-dlp/ffmpeg on its own by default. The committed `nixpacks.toml` tells it to install both (as proper Nix packages, so yt-dlp's own Python dependency is resolved automatically too) alongside Node.
+Railway's zero-config builders (Nixpacks, and its replacement Railpack) only detect the Node app - neither installs yt-dlp/ffmpeg on its own, and Railway has been observed silently switching which one it uses between builds. `railway.json` pins the builder explicitly to `DOCKERFILE` so that never happens again, and the committed `Dockerfile` installs yt-dlp (the standalone `yt-dlp_linux` binary release - not the plain `yt-dlp` asset, which is a Python script that needs a separate `python3`) and ffmpeg alongside Node.
 
 ## Troubleshooting
 
-1. **yt-dlp not found (`spawn yt-dlp ENOENT`) or `python3: No such file or directory`:** ensure yt-dlp (and a working Python) is actually installed and in PATH - test with `yt-dlp --version`. On Railway, make sure `nixpacks.toml` is present and was picked up by the build (check the build logs for `yt-dlp`/`ffmpeg` being installed).
+1. **yt-dlp not found (`spawn yt-dlp ENOENT`) or `python3: No such file or directory`:** ensure yt-dlp (and ffmpeg) is actually installed and in PATH - test with `yt-dlp --version`. On Railway, check the build logs actually say they're building from the `Dockerfile` (not Nixpacks/Railpack) and that the `curl`/`apt-get` steps installing `yt-dlp`/`ffmpeg` ran.
 2. **ffprobe not found:** ambiguous direct-link formats will fail verification and fall through to `DIRECT_LINK_UNAVAILABLE` - install ffmpeg and ensure it's in PATH.
 3. **Permission errors:** check write permissions for `DOWNLOADS_DIR`.
 4. **Download failures:** check if the URL is supported and reachable - some sites require authentication yt-dlp doesn't have.
