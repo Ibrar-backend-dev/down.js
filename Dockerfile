@@ -19,9 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Standalone yt-dlp binary - bundles its own Python, no separate runtime
-# python dependency needed.
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+# yt-dlp_linux (not the plain "yt-dlp" asset - that one is a Python zipapp
+# that still needs a system python3 to run) is the actual standalone
+# PyInstaller build with its own embedded Python - nothing else needed here.
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux -o /usr/local/bin/yt-dlp \
   && chmod a+rx /usr/local/bin/yt-dlp
 
 WORKDIR /app
