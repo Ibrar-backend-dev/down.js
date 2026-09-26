@@ -1,4 +1,7 @@
 providers = ["node"]
 
+# Defining a custom [phases.setup] replaces Nixpacks' auto-detected setup
+# phase instead of adding to it - nodejs_20 must be listed explicitly here
+# too, or npm/node won't exist in the build image at all.
 [phases.setup]
-nixPkgs = ["yt-dlp", "ffmpeg"]
+nixPkgs = ["nodejs_20", "yt-dlp", "ffmpeg"]
