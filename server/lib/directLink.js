@@ -28,7 +28,21 @@ const PLATFORM_COOKIE_DOMAINS = {
   tiktok: { domain: 'tiktok.com', referer: PLATFORM_REFERERS.tiktok }
 };
 
-const ALLOWED_QUALITIES = new Set(['best', 'worst', '2160', '1440', '1080', '720', '480', '360']);
+// A quality selector is 'best', 'worst', or a positive-integer height cap -
+// optionally written with a trailing "p" (e.g. "720p") so the exact label
+// GET /api/info shows for a chosen quality (see server/lib/qualities.js) can
+// be passed straight through to this endpoint without the caller having to
+// strip it themselves first. Returns the normalized selector ('best',
+// 'worst', or a bare number string), or null if the input is not one of
+// these forms.
+function normalizeQualityParam(quality) {
+  if (quality === 'best' || quality === 'worst') return quality;
+  if (typeof quality !== 'string') return null;
+  const match = /^(\d+)p?$/i.exec(quality);
+  if (!match) return null;
+  const height = Number(match[1]);
+  return height > 0 ? String(height) : null;
+}
 
 function hostMatchesDomain(hostname, domain) {
   const host = hostname.toLowerCase();
@@ -90,9 +104,24 @@ function isAmbiguousProgressiveCandidate(format) {
   return !(vcodecKnown && acodecKnown);
 }
 
+// The dimension a quality selector is actually compared against: the short
+// edge (min(width, height)) when a format reports both - the same
+// orientation-agnostic basis GET /api/info uses (see getShortEdge in
+// server/lib/qualities.js) - so requesting "720p" resolves to the real 720p
+// stream whether the source video is landscape or portrait (portrait is the
+// norm for TikTok/Instagram/Facebook reels). Falls back to the raw height
+// when width isn't reported (e.g. Facebook hd/sd, Twitter http-* formats
+// commonly omit it), preserving the old landscape-only behavior there.
+function getQualityDimension(format) {
+  const height = typeof format.height === 'number' ? format.height : null;
+  const width = typeof format.width === 'number' ? format.width : null;
+  if (height === null) return 0;
+  return width !== null ? Math.min(width, height) : height;
+}
+
 // Orders a list of formats by preference for the requested quality, without
 // filtering them - the caller decides which formats are eligible first.
-// - 'best'/'worst' order by highest/lowest height first.
+// - 'best'/'worst' order by highest/lowest quality dimension first.
 // - a numeric height tries the tallest candidate at or below that height
 //   first, then the next-tallest at-or-below, ..., then falls back to
 //   candidates above the target height (shortest-above first) - the
@@ -100,23 +129,23 @@ function isAmbiguousProgressiveCandidate(format) {
 function orderCandidatesByQuality(formats, quality) {
   if (!Array.isArray(formats)) return [];
 
-  const withHeight = formats
-    .map((format) => ({ format, height: typeof format.height === 'number' ? format.height : 0 }))
-    .sort((a, b) => a.height - b.height);
+  const withDimension = formats
+    .map((format) => ({ format, dimension: getQualityDimension(format) }))
+    .sort((a, b) => a.dimension - b.dimension);
 
-  if (withHeight.length === 0) return [];
+  if (withDimension.length === 0) return [];
 
   if (quality === 'worst') {
-    return withHeight.map((c) => c.format);
+    return withDimension.map((c) => c.format);
   }
 
   if (!quality || quality === 'best') {
-    return [...withHeight].reverse().map((c) => c.format);
+    return [...withDimension].reverse().map((c) => c.format);
   }
 
-  const targetHeight = Number(quality);
-  const atOrBelow = withHeight.filter((c) => c.height <= targetHeight).reverse();
-  const above = withHeight.filter((c) => c.height > targetHeight);
+  const targetDimension = Number(quality);
+  const atOrBelow = withDimension.filter((c) => c.dimension <= targetDimension).reverse();
+  const above = withDimension.filter((c) => c.dimension > targetDimension);
   return [...atOrBelow, ...above].map((c) => c.format);
 }
 
@@ -178,7 +207,7 @@ function safeFilename(title, fallback = 'video') {
 }
 
 module.exports = {
-  ALLOWED_QUALITIES,
+  normalizeQualityParam,
   PLATFORM_REFERERS,
   PLATFORM_COOKIE_DOMAINS,
   detectPlatform,

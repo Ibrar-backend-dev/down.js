@@ -11,7 +11,7 @@ childProcess.spawn = (...args) => {
   return mockImpl(...args);
 };
 
-const { probeHasVideoAndAudio } = require('../server/lib/ffprobe');
+const { probeHasVideoAndAudio, probeLocalVideoResolution } = require('../server/lib/ffprobe');
 
 function makeFakeProbe({ stdout = '', exitCode = 0, spawnError = null, hang = false }) {
   const proc = new EventEmitter();
@@ -70,5 +70,43 @@ test('probeHasVideoAndAudio resolves false and does not hang when ffprobe never 
   mockImpl = () => makeFakeProbe({ hang: true });
   const result = await probeHasVideoAndAudio('https://cdn.example.com/video.mp4', { timeoutMs: 50 });
   assert.equal(result, false);
+  mockImpl = null;
+});
+
+test('probeLocalVideoResolution returns the first video stream\'s width/height', async () => {
+  mockImpl = () => makeFakeProbe({
+    stdout: JSON.stringify({
+      streams: [
+        { codec_type: 'audio' },
+        { codec_type: 'video', width: 1280, height: 720 }
+      ]
+    }),
+    exitCode: 0
+  });
+  assert.deepEqual(await probeLocalVideoResolution('/tmp/video.mp4'), { width: 1280, height: 720 });
+  mockImpl = null;
+});
+
+test('probeLocalVideoResolution returns null when there is no video stream', async () => {
+  mockImpl = () => makeFakeProbe({
+    stdout: JSON.stringify({ streams: [{ codec_type: 'audio' }] }),
+    exitCode: 0
+  });
+  assert.equal(await probeLocalVideoResolution('/tmp/audio.mp3'), null);
+  mockImpl = null;
+});
+
+test('probeLocalVideoResolution returns null when the video stream has no width/height', async () => {
+  mockImpl = () => makeFakeProbe({
+    stdout: JSON.stringify({ streams: [{ codec_type: 'video' }] }),
+    exitCode: 0
+  });
+  assert.equal(await probeLocalVideoResolution('/tmp/video.mp4'), null);
+  mockImpl = null;
+});
+
+test('probeLocalVideoResolution returns null when ffprobe fails', async () => {
+  mockImpl = () => makeFakeProbe({ exitCode: 1 });
+  assert.equal(await probeLocalVideoResolution('/tmp/missing.mp4'), null);
   mockImpl = null;
 });

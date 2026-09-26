@@ -9,7 +9,8 @@ const {
   isB2Enabled,
   uploadFile,
   listFiles,
-  deleteFile
+  deleteFile,
+  getDownloadUrl
 } = require('../server/lib/storage');
 
 const B2_ENV_KEYS = ['B2_KEY_ID', 'B2_APPLICATION_KEY', 'B2_BUCKET', 'B2_ENDPOINT', 'B2_REGION'];
@@ -184,4 +185,74 @@ test('listFiles/deleteFile throw when B2 is not configured', async () => {
     await assert.rejects(() => listFiles(), /not configured/);
     await assert.rejects(() => deleteFile('key'), /not configured/);
   });
+});
+
+test('getDownloadUrl passes the bucket/key/expiry to the injected presign function and returns its result', async () => {
+  await withB2Env({
+    B2_KEY_ID: 'id',
+    B2_APPLICATION_KEY: 'key',
+    B2_BUCKET: 'my-bucket',
+    B2_ENDPOINT: 'https://example.com'
+  }, async () => {
+    let seenArgs = null;
+    const presign = async (args) => {
+      seenArgs = args;
+      return 'https://example.com/presigned-url';
+    };
+
+    const url = await getDownloadUrl('videos/hello.mp4', { presign, expiresInSeconds: 120 });
+    assert.equal(url, 'https://example.com/presigned-url');
+    assert.deepEqual(seenArgs, { bucket: 'my-bucket', key: 'videos/hello.mp4', expiresInSeconds: 120 });
+  });
+});
+
+test('getDownloadUrl defaults to a 60 second expiry', async () => {
+  await withB2Env({
+    B2_KEY_ID: 'id',
+    B2_APPLICATION_KEY: 'key',
+    B2_BUCKET: 'my-bucket',
+    B2_ENDPOINT: 'https://example.com'
+  }, async () => {
+    let seenArgs = null;
+    await getDownloadUrl('key', { presign: async (args) => { seenArgs = args; return 'url'; } });
+    assert.equal(seenArgs.expiresInSeconds, 60);
+  });
+});
+
+test('getDownloadUrl throws when B2 is not configured', async () => {
+  await withB2Env({}, async () => {
+    await assert.rejects(() => getDownloadUrl('key'), /not configured/);
+  });
+});
+
+test('getDownloadUrl (real signing path) forces a Content-Disposition: attachment so the link downloads, not plays inline', async () => {
+  // storage.js requires @aws-sdk/s3-request-presigner lazily on each call,
+  // but require() is a process-wide cache, so patching its export here
+  // (before calling the real, non-DI signing path) takes effect there too -
+  // same technique test/downloadRoute.test.js uses for child_process.spawn.
+  const presigner = require('@aws-sdk/s3-request-presigner');
+  const realGetSignedUrl = presigner.getSignedUrl;
+  let seenCommand = null;
+  presigner.getSignedUrl = async (client, command) => {
+    seenCommand = command;
+    return 'https://example.com/signed';
+  };
+
+  try {
+    await withB2Env({
+      B2_KEY_ID: 'id',
+      B2_APPLICATION_KEY: 'key',
+      B2_BUCKET: 'my-bucket',
+      B2_ENDPOINT: 'https://example.com'
+    }, async () => {
+      const client = { send: async () => ({}) };
+      const url = await getDownloadUrl('My Video.mp4', { client });
+      assert.equal(url, 'https://example.com/signed');
+      assert.equal(seenCommand.input.Bucket, 'my-bucket');
+      assert.equal(seenCommand.input.Key, 'My Video.mp4');
+      assert.equal(seenCommand.input.ResponseContentDisposition, 'attachment; filename="My Video.mp4"');
+    });
+  } finally {
+    presigner.getSignedUrl = realGetSignedUrl;
+  }
 });

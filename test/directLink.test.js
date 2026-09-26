@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
-  ALLOWED_QUALITIES,
+  normalizeQualityParam,
   PLATFORM_REFERERS,
   PLATFORM_COOKIE_DOMAINS,
   detectPlatform,
@@ -118,9 +118,12 @@ test('isAmbiguousProgressiveCandidate rejects non-mp4-container formats', () => 
 });
 
 test('orderCandidatesByQuality orders best-first, worst-first, and at-or-below-then-fallback', () => {
-  const f360 = mp4Format({ height: 360, url: 'https://cdn.example.com/360.mp4' });
-  const f480 = mp4Format({ height: 480, url: 'https://cdn.example.com/480.mp4' });
-  const f1080 = mp4Format({ height: 1080, url: 'https://cdn.example.com/1080.mp4' });
+  // width: null - these are plain landscape-style formats with no width
+  // reported (e.g. Facebook hd/sd), so ordering falls back to raw height
+  // (see the dedicated short-edge/portrait test below for width-known formats).
+  const f360 = mp4Format({ width: null, height: 360, url: 'https://cdn.example.com/360.mp4' });
+  const f480 = mp4Format({ width: null, height: 480, url: 'https://cdn.example.com/480.mp4' });
+  const f1080 = mp4Format({ width: null, height: 1080, url: 'https://cdn.example.com/1080.mp4' });
   const formats = [f360, f480, f1080];
 
   assert.deepEqual(orderCandidatesByQuality(formats, 'best').map((f) => f.height), [1080, 480, 360]);
@@ -128,6 +131,26 @@ test('orderCandidatesByQuality orders best-first, worst-first, and at-or-below-t
   assert.deepEqual(orderCandidatesByQuality(formats, '720').map((f) => f.height), [480, 360, 1080]);
   assert.deepEqual(orderCandidatesByQuality(formats, '200').map((f) => f.height), [360, 480, 1080]);
   assert.deepEqual(orderCandidatesByQuality([], 'best'), []);
+});
+
+test('orderCandidatesByQuality compares the short edge, not raw height, when width is known (portrait video)', () => {
+  // A real portrait 720p clip (e.g. a vertical TikTok/Reel) is reported as
+  // 720x1280 - comparing raw height (1280) against a "720" target would
+  // wrongly treat it as above the target instead of matching it exactly.
+  const f720Portrait = mp4Format({ width: 720, height: 1280, url: 'https://cdn.example.com/720-portrait.mp4' });
+  const f480Portrait = mp4Format({ width: 480, height: 854, url: 'https://cdn.example.com/480-portrait.mp4' });
+  const formats = [f480Portrait, f720Portrait];
+
+  assert.deepEqual(orderCandidatesByQuality(formats, '720').map((f) => f.url), [
+    'https://cdn.example.com/720-portrait.mp4',
+    'https://cdn.example.com/480-portrait.mp4'
+  ]);
+});
+
+test('orderCandidatesByQuality falls back to raw height when width is unreported (e.g. Facebook hd/sd)', () => {
+  const f480 = mp4Format({ height: 480, url: 'https://cdn.example.com/480.mp4' });
+  const f720 = mp4Format({ height: 720, url: 'https://cdn.example.com/720.mp4' });
+  assert.deepEqual(orderCandidatesByQuality([f480, f720], '720').map((f) => f.height), [720, 480]);
 });
 
 test('PLATFORM_REFERERS declares a referer for every supported platform', () => {
@@ -153,9 +176,9 @@ test('selectProgressiveMp4 picks the shortest candidate for "worst"', () => {
 
 test('selectProgressiveMp4 picks the best match at or below the requested height', () => {
   const formats = [
-    mp4Format({ height: 360, url: 'https://cdn.example.com/360.mp4' }),
-    mp4Format({ height: 480, url: 'https://cdn.example.com/480.mp4' }),
-    mp4Format({ height: 1080, url: 'https://cdn.example.com/1080.mp4' })
+    mp4Format({ width: null, height: 360, url: 'https://cdn.example.com/360.mp4' }),
+    mp4Format({ width: null, height: 480, url: 'https://cdn.example.com/480.mp4' }),
+    mp4Format({ width: null, height: 1080, url: 'https://cdn.example.com/1080.mp4' })
   ];
   assert.equal(selectProgressiveMp4(formats, '720').url, 'https://cdn.example.com/480.mp4');
 });
@@ -204,11 +227,28 @@ test('platform profiles each resolve a valid progressive mp4', () => {
   }
 });
 
-test('ALLOWED_QUALITIES matches the documented values', () => {
-  assert.deepEqual(
-    [...ALLOWED_QUALITIES].sort(),
-    ['1080', '1440', '2160', '360', '480', '720', 'best', 'worst'].sort()
-  );
+test('normalizeQualityParam passes "best"/"worst" through unchanged', () => {
+  assert.equal(normalizeQualityParam('best'), 'best');
+  assert.equal(normalizeQualityParam('worst'), 'worst');
+});
+
+test('normalizeQualityParam accepts a bare height and strips a trailing "p" (the GET /api/info label)', () => {
+  assert.equal(normalizeQualityParam('720'), '720');
+  assert.equal(normalizeQualityParam('720p'), '720');
+  assert.equal(normalizeQualityParam('720P'), '720');
+  // Not limited to a fixed preset list - a video's real short-edge quality
+  // (e.g. TikTok's "576p") must be acceptable too.
+  assert.equal(normalizeQualityParam('576p'), '576');
+});
+
+test('normalizeQualityParam rejects non-numeric, zero, negative, and non-string input', () => {
+  assert.equal(normalizeQualityParam('abc'), null);
+  assert.equal(normalizeQualityParam('12ab'), null);
+  assert.equal(normalizeQualityParam('0'), null);
+  assert.equal(normalizeQualityParam('0p'), null);
+  assert.equal(normalizeQualityParam('-5'), null);
+  assert.equal(normalizeQualityParam(undefined), null);
+  assert.equal(normalizeQualityParam(null), null);
 });
 
 test('safeFilename strips unsafe characters and appends .mp4', () => {

@@ -108,11 +108,44 @@ async function deleteFile(key, options = {}) {
   await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key }));
 }
 
+// Returns a time-limited URL the caller can fetch/redirect a client to
+// directly, without proxying the bytes through our server. Presigning needs
+// the real SDK signing machinery (not just `.send()`), so this - unlike the
+// functions above - takes an injectable `presign` function for testing
+// rather than an injectable client.
+async function getDownloadUrl(key, options = {}) {
+  const config = getB2Config();
+  if (!config) {
+    throw new Error('B2 storage is not configured');
+  }
+  const expiresInSeconds = options.expiresInSeconds || 60;
+
+  if (options.presign) {
+    return options.presign({ bucket: config.bucket, key, expiresInSeconds });
+  }
+
+  const client = options.client || getS3Client();
+  const { GetObjectCommand } = require('@aws-sdk/client-s3');
+  const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+  const command = new GetObjectCommand({
+    Bucket: config.bucket,
+    Key: key,
+    // Without this, the presigned URL serves inline (Content-Type only) -
+    // clicking it plays the video in the browser instead of downloading it,
+    // same problem the bare /link CDN URLs have. This forces a real
+    // "Save As" download, same as the local-storage path does with
+    // Content-Disposition via res.download().
+    ResponseContentDisposition: `attachment; filename="${key.replace(/"/g, '')}"`
+  });
+  return getSignedUrl(client, command, { expiresIn: expiresInSeconds });
+}
+
 module.exports = {
   getB2Config,
   isB2Enabled,
   getS3Client,
   uploadFile,
   listFiles,
-  deleteFile
+  deleteFile,
+  getDownloadUrl
 };
