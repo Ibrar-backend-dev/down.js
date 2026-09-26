@@ -124,9 +124,13 @@ Runs the Node built-in test runner (`node --test`) over `test/*.test.js`.
 
 Run `yt-dlp --list-extractors` for yt-dlp's full site list.
 
+## Deploying to Railway
+
+Railway's default Nixpacks builder only detects the Node app - it won't install yt-dlp/ffmpeg on its own, and will fail with `spawn yt-dlp ENOENT`. The committed `Dockerfile` installs yt-dlp/ffmpeg alongside Node - Railway auto-detects it and builds from it instead of Nixpacks once it's present.
+
 ## Troubleshooting
 
-1. **yt-dlp not found:** ensure it's installed and in PATH - test with `yt-dlp --version`.
+1. **yt-dlp not found (`spawn yt-dlp ENOENT`):** ensure it's installed and in PATH - test with `yt-dlp --version`. On Railway, make sure the deploy actually built from the `Dockerfile` (check the build logs for `yt-dlp`/`ffmpeg` being installed) rather than falling back to Nixpacks.
 2. **ffprobe not found:** ambiguous direct-link formats will fail verification and fall through to `DIRECT_LINK_UNAVAILABLE` - install ffmpeg and ensure it's in PATH.
 3. **Permission errors:** check write permissions for `DOWNLOADS_DIR`.
 4. **Download failures:** check if the URL is supported and reachable - some sites require authentication yt-dlp doesn't have.

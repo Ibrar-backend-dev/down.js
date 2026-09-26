@@ -1,31 +1,40 @@
 // Reduces yt-dlp's raw format list (which often has many duplicate/near-
-// duplicate entries - separate audio/video tracks, several HLS+DASH
-// bitrate variants of the same resolution, etc.) to one representative
-// format per distinct resolution, highest resolution first. Audio-only or
-// unknown-resolution formats are excluded, so every remaining entry is a
-// real, distinct choice a caller could ask for. When a resolution has
-// multiple bitrate variants (common with DASH), the highest-bitrate one is
-// kept, since that's the best real quality available at that resolution.
-// Pure/sync - callers needing a real filesize fetch it separately (see
-// server/lib/formatSize.js), since that requires a network request.
+// duplicate entries - separate audio/video tracks, several HLS+DASH+fallback
+// variants of the same real quality, etc.) to one representative format per
+// distinct QUALITY (the "<n>p" short-edge label - see formatQualityLabel),
+// highest quality first. Deduping by the label itself, not by exact
+// width x height, matters because the same real quality is often reported
+// under slightly different dimensions across a site's own hls-*/dash-*/
+// fallback formats (e.g. Reddit's 480p "fallback" vs "hls-451" formats) -
+// deduping by exact dimensions would let both slip through as if they were
+// different qualities. Audio-only or unknown-resolution formats are
+// excluded, so every remaining entry is a real, distinct choice a caller
+// could ask for. When a quality has multiple variants, the highest-bitrate
+// one is kept (an HLS manifest/segment reference reporting no bitrate loses
+// to a real fallback/dash format that does), since that's the best real
+// stream available at that quality. Pure/sync - callers needing a real
+// filesize fetch it separately (see server/lib/formatSize.js), since that
+// requires a network request.
 function extractQualities(formats) {
   if (!Array.isArray(formats)) return [];
 
-  const bestByResolution = new Map();
+  const bestByQuality = new Map();
 
   for (const format of formats) {
     if (!format || typeof format.width !== 'number' || typeof format.height !== 'number') {
       continue;
     }
-    const key = `${format.width}x${format.height}`;
+    const shortEdge = getShortEdge(format.width, format.height);
+    if (!shortEdge || shortEdge <= 0) continue;
+
     const bitrate = typeof format.tbr === 'number' ? format.tbr : 0;
-    const existing = bestByResolution.get(key);
+    const existing = bestByQuality.get(shortEdge);
     if (!existing || bitrate > existing.bitrate) {
-      bestByResolution.set(key, { format, bitrate });
+      bestByQuality.set(shortEdge, { format, bitrate });
     }
   }
 
-  const qualities = Array.from(bestByResolution.values()).map(({ format }) => ({
+  const qualities = Array.from(bestByQuality.values()).map(({ format }) => ({
     format_id: format.format_id,
     ext: format.ext,
     width: format.width,
@@ -42,7 +51,7 @@ function extractQualities(formats) {
     url: format.url
   }));
 
-  qualities.sort((a, b) => (b.height - a.height) || (b.width - a.width));
+  qualities.sort((a, b) => getShortEdge(b.width, b.height) - getShortEdge(a.width, a.height));
   return qualities;
 }
 

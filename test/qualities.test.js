@@ -15,6 +15,21 @@ test('extractQualities deduplicates by resolution, keeping the highest-bitrate v
   ]);
 });
 
+test('extractQualities dedupes by the quality label (short edge), not exact width x height, keeping the highest-bitrate variant', () => {
+  // Real Reddit data: a "fallback" and an "hls-*" format both report short
+  // edge 480 (same real quality) but under different width x height - a
+  // dedup keyed on exact dimensions would wrongly let both through as if
+  // they were distinct qualities.
+  const formats = [
+    { format_id: 'fallback', ext: 'mp4', width: 854, height: 480, tbr: 600, filesize: 2_684_355, url: 'https://cdn.example.com/fallback-480.mp4' },
+    { format_id: 'hls-451', ext: 'mp4', width: 640, height: 480, url: 'https://cdn.example.com/hls-451.m3u8' }
+  ];
+  const qualities = extractQualities(formats);
+  assert.equal(qualities.length, 1);
+  assert.equal(qualities[0].format_id, 'fallback');
+  assert.equal(qualities[0].quality, '480p');
+});
+
 test('extractQualities carries through yt-dlp\'s own real filesize when the platform reports one (e.g. TikTok)', () => {
   const formats = [
     { format_id: 'bytevc1_720p', ext: 'mp4', width: 720, height: 1280, filesize: 377066, url: 'https://cdn.example.com/720.mp4' }
