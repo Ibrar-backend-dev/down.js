@@ -13,6 +13,8 @@ async function fetchRealFilesizeMb(url, options = {}) {
   try {
     const res = await fetchFn(url, { method: 'HEAD', signal: controller.signal, headers });
     if (!res.ok) return null;
+    // A playlist's Content-Length is its own few hundred bytes, which would round to 0 MB.
+    if (/mpegurl|dash\+xml/i.test(res.headers.get('content-type') || '')) return null;
 
     const contentLength = res.headers.get('content-length');
     if (!contentLength) return null;
@@ -28,4 +30,11 @@ async function fetchRealFilesizeMb(url, options = {}) {
   }
 }
 
-module.exports = { fetchRealFilesizeMb };
+// Live size for direct files, else the platform's own reported size. `format`
+// is a qualities.js candidate ({ direct, url, filesize-in-MB }).
+async function resolveRealSizeMb(format, options) {
+  const live = format.direct && format.url ? await fetchRealFilesizeMb(format.url, options) : null;
+  return live ?? format.filesize ?? null;
+}
+
+module.exports = { fetchRealFilesizeMb, resolveRealSizeMb };

@@ -504,22 +504,86 @@ test('POST /api/download merges best video+audio instead of a single-format sele
   });
 });
 
-test('POST /api/download applies the height cap to both sides of the video+audio merge selector', async () => {
-  let seenArgs = null;
+test('POST /api/download picks quality by short edge (so portrait video works), accepting the "<n>p" label from GET /api/info', async () => {
+  // A height filter broke portrait video: real Reddit 270x480 "270p" failed
+  // outright, and "720p" (720x1280) silently downloaded 360p.
+  const cases = [
+    { quality: '270p', sort: 'res:270,proto,tbr' },
+    { quality: '480', sort: 'res:480,proto,tbr' },
+    { quality: 'best', sort: 'res,proto,tbr' },
+    { quality: undefined, sort: 'res,proto,tbr' },
+    { quality: 'worst', sort: '+res,proto,tbr' }
+  ];
+
+  for (const { quality, sort } of cases) {
+    let seenArgs = null;
+    mockImpl = (command, args) => {
+      if (command === 'ffprobe') return makeFakeProbeProcess({ streams: [] });
+      seenArgs = args;
+      return makeFakeProcess({ stdout: '[Merger] Merging formats into "This is a robbery.mp4"', exitCode: 0 });
+    };
+
+    await withServer(async (baseUrl) => {
+      const res = await fetch(`${baseUrl}/api/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: 'https://www.reddit.com/r/funny/comments/1t5drxy/this_is_a_robbery/', quality })
+      });
+      assert.equal(res.status, 200, `quality=${quality}`);
+      assert.equal(seenArgs[seenArgs.indexOf('-f') + 1], 'bestvideo+bestaudio/best');
+      assert.equal(seenArgs[seenArgs.indexOf('-S') + 1], sort, `quality=${quality}`);
+    });
+  }
+});
+
+test('POST /api/download writes each request to its own file, so a second quality never reuses the first one', async () => {
+  // Real bug: with a shared "<title>.mp4", requesting 720p right after 1080p
+  // made yt-dlp report "has already been downloaded" and return the 1080p file.
+  const templates = [];
   mockImpl = (command, args) => {
     if (command === 'ffprobe') return makeFakeProbeProcess({ streams: [] });
-    seenArgs = args;
-    return makeFakeProcess({ stdout: '[Merger] Merging formats into "This is a robbery.mp4"', exitCode: 0 });
+    const template = args[args.indexOf('-o') + 1];
+    templates.push(template);
+    const filename = path.basename(template).replace('%(title)s', 'Cat video').replace('%(ext)s', 'mp4');
+    return makeFakeProcess({ stdout: `[Merger] Merging formats into "${filename}"`, exitCode: 0 });
+  };
+
+  await withServer(async (baseUrl) => {
+    const titles = [];
+    for (const quality of ['1080p', '720p']) {
+      const res = await fetch(`${baseUrl}/api/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: 'https://www.reddit.com/r/CATHELP/comments/abc/cat/', quality })
+      });
+      assert.equal(res.status, 200);
+      titles.push((await res.json()).title);
+    }
+
+    assert.equal(templates.length, 2);
+    assert.notEqual(templates[0], templates[1]);
+    for (const template of templates) {
+      assert.match(path.basename(template), /^%\(title\)s \[[0-9a-f]{8}\]\.%\(ext\)s$/);
+    }
+    assert.deepEqual(titles, ['Cat video', 'Cat video'], 'the file tag is not leaked into the title');
+  });
+});
+
+test('POST /api/download rejects an invalid quality with 400 instead of passing it to yt-dlp', async () => {
+  let spawned = false;
+  mockImpl = () => {
+    spawned = true;
+    return makeFakeProcess({ stdout: '', exitCode: 0 });
   };
 
   await withServer(async (baseUrl) => {
     const res = await fetch(`${baseUrl}/api/download`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url: 'https://www.reddit.com/r/funny/comments/1t5drxy/this_is_a_robbery/', quality: '480' })
+      body: JSON.stringify({ url: 'https://www.reddit.com/r/funny/comments/1t5drxy/this_is_a_robbery/', quality: '720]+bestaudio' })
     });
-    assert.equal(res.status, 200);
-    assert.equal(seenArgs[seenArgs.indexOf('-f') + 1], 'bestvideo[height<=480]+bestaudio/best[height<=480]/best');
+    assert.equal(res.status, 400);
+    assert.equal(spawned, false);
   });
 });
 

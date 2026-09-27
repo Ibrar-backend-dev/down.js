@@ -63,10 +63,6 @@ const DEFAULT_NOTE = 'The URL may expire in 40 seconds.';
 const TIKTOK_NOTE_WITH_HEADERS = 'The URL may expire in 40 seconds. TikTok also requires the "requestHeaders" (Cookie + Referer) below to be sent with the download request - the CDN returns 403 without them.';
 const TIKTOK_NOTE_NO_HEADERS = 'The URL may expire in 40 seconds. TikTok additionally ties this CDN URL to the session that resolved it - the server could not capture that session this time, so some clients may see a 403 from TikTok even though the link is valid; retry resolution.';
 
-function logLinkStep(requestId, platform, step, details = {}) {
-  console.log(`[direct-link] req=${requestId} platform=${platform || 'unknown'} step=${step}`, details);
-}
-
 // GET /api/download/link?url=<source-url>&quality=<best|worst|height|heightp>
 // Resolves a single direct, progressive (video+audio) HTTPS MP4 URL for a
 // supported platform post - never a playlist, manifest, or fragmented format.
@@ -77,29 +73,22 @@ router.get('/link', (req, res) => {
   const requestId = crypto.randomUUID();
   const { url, quality = 'best' } = req.query;
 
-  logLinkStep(requestId, null, 'request_received', { url, quality });
-
   if (typeof url !== 'string' || !/^https?:\/\/.+/i.test(url)) {
-    logLinkStep(requestId, null, 'rejected_invalid_url');
     return res.status(400).json({ error: 'A valid HTTP/HTTPS URL is required', code: 'INVALID_URL' });
   }
 
   const selectedQuality = normalizeQualityParam(quality);
   if (!selectedQuality) {
-    logLinkStep(requestId, null, 'rejected_invalid_quality', { quality });
     return res.status(400).json({ error: 'Invalid quality value', code: 'INVALID_QUALITY' });
   }
 
   const platform = detectPlatform(url);
   if (!platform) {
-    logLinkStep(requestId, null, 'rejected_unsupported_platform', { url });
     return res.status(422).json({
       error: 'This site is not supported for direct-link resolution',
       code: 'UNSUPPORTED_DIRECT_LINK_PLATFORM'
     });
   }
-
-  logLinkStep(requestId, platform, 'platform_detected', { quality: selectedQuality });
 
   const cookieConfig = PLATFORM_COOKIE_DOMAINS[platform] || null;
   const cookieJarPath = cookieConfig
@@ -120,8 +109,6 @@ router.get('/link', (req, res) => {
 
   args.push(url);
 
-  logLinkStep(requestId, platform, 'ytdlp_spawn', { args });
-
   const MAX_METADATA_BYTES = 8 * 1024 * 1024;
   let output = '';
   let stderr = '';
@@ -131,7 +118,6 @@ router.get('/link', (req, res) => {
   const respondOnce = (status, payload) => {
     if (!responded) {
       responded = true;
-      logLinkStep(requestId, platform, 'response_sent', { status, code: payload.code });
       res.status(status).json(payload);
       if (cookieJarPath) {
         fs.remove(cookieJarPath).catch(() => {});
@@ -150,7 +136,6 @@ router.get('/link', (req, res) => {
   });
 
   ytdlp.on('error', (error) => {
-    logLinkStep(requestId, platform, 'ytdlp_start_failed', { message: error.message });
     respondOnce(502, {
       error: 'Unable to start yt-dlp',
       code: 'YTDLP_START_FAILED',
@@ -162,8 +147,6 @@ router.get('/link', (req, res) => {
     if (responded) {
       return;
     }
-
-    logLinkStep(requestId, platform, 'ytdlp_closed', { code, stderrTail: code !== 0 ? stderr.slice(-500) : undefined });
 
     if (code !== 0) {
       return respondOnce(502, {
@@ -177,7 +160,6 @@ router.get('/link', (req, res) => {
     try {
       metadata = JSON.parse(output);
     } catch (parseError) {
-      logLinkStep(requestId, platform, 'metadata_parse_failed', { message: parseError.message });
       return respondOnce(502, {
         error: 'yt-dlp returned malformed metadata',
         code: 'YTDLP_EXTRACTOR_FAILED',
@@ -189,42 +171,16 @@ router.get('/link', (req, res) => {
       ? metadata.formats
       : (metadata.url ? [metadata] : []);
 
-    logLinkStep(requestId, platform, 'metadata_parsed', { title: metadata.title, formatCount: formats.length });
-
     const selected = await resolveDirectLinkFormat(formats, selectedQuality, {
       userAgent: DIRECT_LINK_USER_AGENT,
-      referer: PLATFORM_REFERERS[platform],
-      onAttempt: (format, outcome) => {
-        logLinkStep(requestId, platform, 'format_attempt', {
-          formatId: format.format_id,
-          protocol: format.protocol,
-          height: format.height,
-          outcome
-        });
-      }
+      referer: PLATFORM_REFERERS[platform]
     });
     if (!selected) {
-      logLinkStep(requestId, platform, 'no_progressive_mp4_found');
       return respondOnce(422, {
         error: 'No direct progressive MP4 is available for this post',
         code: 'DIRECT_LINK_UNAVAILABLE'
       });
     }
-
-    let selectedHost = null;
-    try {
-      selectedHost = new URL(selected.url).host;
-    } catch {
-      // selected.url is already validated as http(s) upstream; ignore.
-    }
-    logLinkStep(requestId, platform, 'format_selected', {
-      formatId: selected.format_id,
-      ext: selected.ext,
-      protocol: selected.protocol,
-      width: selected.width,
-      height: selected.height,
-      host: selectedHost
-    });
 
     let requestHeaders = null;
     let note = DEFAULT_NOTE;
@@ -240,10 +196,8 @@ router.get('/link', (req, res) => {
         } else {
           note = TIKTOK_NOTE_NO_HEADERS;
         }
-        logLinkStep(requestId, platform, 'cookie_jar_captured', { cookieCount: cookies.length });
-      } catch (jarError) {
+      } catch {
         note = TIKTOK_NOTE_NO_HEADERS;
-        logLinkStep(requestId, platform, 'cookie_jar_read_failed', { message: jarError.message });
       }
     }
 
@@ -303,6 +257,13 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ error: 'Invalid URL format. Please provide a valid HTTP/HTTPS URL.' });
     }
 
+    const selectedQuality = (quality === undefined || quality === null || quality === '')
+      ? 'best'
+      : normalizeQualityParam(String(quality));
+    if (!audioOnly && !selectedQuality) {
+      return res.status(400).json({ error: 'Invalid quality value' });
+    }
+
     const downloadsDir = DOWNLOADS_DIR;
     await fs.ensureDir(downloadsDir);
 
@@ -320,19 +281,24 @@ router.post('/', async (req, res) => {
     } else {
       // Sites that only ever serve split video-only/audio-only tracks (e.g.
       // Reddit) have no genuine single pre-merged format, so a "best single
-      // format" selector like 'b' or 'best[height<=Q]' can outright fail
-      // with "Requested format is not available". Prefer merging the best
-      // video+audio pair (yt-dlp/ffmpeg does the mux) and only fall back to
-      // a video-only 'best' pick when a video genuinely has no audio track.
-      if (quality && quality !== 'best') {
-        args.push('-f', `bestvideo[height<=${quality}]+bestaudio/best[height<=${quality}]/best`);
-      } else {
-        args.push('-f', 'bestvideo+bestaudio/best');
-      }
+      // format" selector like 'b' can outright fail with "Requested format
+      // is not available". Prefer merging the best video+audio pair
+      // (yt-dlp/ffmpeg does the mux), else the best combined format.
+      args.push('-f', 'bestvideo+bestaudio/best');
+      // `res` is the short edge, so portrait video matches GET /api/info's "<n>p"
+      // labels (a height filter picks 360p for a portrait "720p"). proto,tbr
+      // mirror isPreferredVariant in server/lib/qualities.js so both pick the same file.
+      const resSort = selectedQuality === 'best' ? 'res'
+        : selectedQuality === 'worst' ? '+res'
+          : `res:${selectedQuality}`;
+      args.push('-S', `${resSort},proto,tbr`);
       args.push('--merge-output-format', 'mp4');
     }
 
-    args.push('-o', path.join(downloadsDir, '%(title)s.%(ext)s'));
+    // Unique per request: with a shared "<title>.mp4" a second quality of the same
+    // video reused the first request's file ("has already been downloaded").
+    const fileTag = crypto.randomUUID().slice(0, 8);
+    args.push('-o', path.join(downloadsDir, `%(title)s [${fileTag}].%(ext)s`));
     args.push('--no-playlist');
     args.push('--progress');
     args.push(url);
@@ -341,15 +307,7 @@ router.post('/', async (req, res) => {
 
     const result = await runYtdlpWithRetry(args, {
       retryDelayMs: PROCESSING_RETRY_DELAY_MS,
-      maxWaitMs: PROCESSING_MAX_WAIT_MS,
-      onStdoutChunk: (chunk) => console.log('yt-dlp stdout:', chunk),
-      onAttempt: (attempt, attemptResult, isTransient) => {
-        if (isTransient) {
-          console.log(`[retry] attempt ${attempt} reported the video is still processing - waiting ${PROCESSING_RETRY_DELAY_MS}ms before retrying`);
-        } else if (attemptResult.stderr) {
-          console.error('yt-dlp stderr:', attemptResult.stderr);
-        }
-      }
+      maxWaitMs: PROCESSING_MAX_WAIT_MS
     });
 
     if (result.spawnError) {
@@ -367,7 +325,7 @@ router.post('/', async (req, res) => {
     // component files first - each logs its own "[download] Destination:"
     // line - then merges them into the final file via ffmpeg, logged
     // separately. If a component (or the whole output) already exists on
-    // disk from an earlier request, yt-dlp logs "<path> has already been
+    // disk from an earlier retry attempt, yt-dlp logs "<path> has already been
     // downloaded" instead of a "Destination:" line for that component - a
     // real success (the file genuinely exists), just a different message
     // format, so it needs its own pattern rather than being read as "no
@@ -391,7 +349,7 @@ router.post('/', async (req, res) => {
     const localFilePath = path.join(downloadsDir, filename);
     const platform = detectPlatform(url);
     const contentType = audioOnly ? (AUDIO_CONTENT_TYPES[format] || AUDIO_CONTENT_TYPES.mp3) : 'video/mp4';
-    const title = path.parse(filename).name;
+    const title = path.parse(filename).name.replace(/ \[[0-9a-f]{8}\]$/, '');
     // Read the real, final pixel dimensions from the downloaded file itself
     // - not just an echo of the requested quality string - then report them
     // as the same "720p"-style short-edge label used by GET /api/info (see
@@ -428,7 +386,6 @@ router.post('/', async (req, res) => {
           expiresInSeconds: Math.ceil(AUTO_CLEANUP_DELAY_MS / 1000)
         });
       } catch (uploadError) {
-        console.error('B2 upload error:', uploadError);
         return res.status(502).json({
           error: 'Download completed but failed to upload to B2',
           details: uploadError.message
@@ -451,9 +408,8 @@ router.post('/', async (req, res) => {
         } else {
           await fs.remove(localFilePath);
         }
-        console.log(`[auto-cleanup] removed "${filename}" (${cleanupFromB2 ? 'b2' : 'local'}) after ${AUTO_CLEANUP_DELAY_MS}ms`);
-      } catch (cleanupError) {
-        console.error(`[auto-cleanup] failed to remove "${filename}":`, cleanupError);
+      } catch {
+        // Swallowed so a failed delete can't crash the process; the B2 sweep retries leftovers.
       }
     }, AUTO_CLEANUP_DELAY_MS);
 
@@ -469,7 +425,6 @@ router.post('/', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Download error:', error);
     res.status(500).json({
       error: 'Download failed',
       details: error.message
@@ -502,8 +457,7 @@ router.get('/list', async (req, res) => {
     );
 
     res.json(fileList);
-  } catch (error) {
-    console.error('Error listing files:', error);
+  } catch {
     res.status(500).json({ error: 'Failed to list files' });
   }
 });
@@ -532,8 +486,7 @@ router.get('/:filename', async (req, res) => {
     }
 
     res.download(filePath, filename);
-  } catch (error) {
-    console.error('Error serving file:', error);
+  } catch {
     res.status(500).json({ error: 'Failed to serve file' });
   }
 });
@@ -557,8 +510,7 @@ router.delete('/:filename', async (req, res) => {
 
     await fs.remove(filePath);
     res.json({ success: true, message: 'File deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting file:', error);
+  } catch {
     res.status(500).json({ error: 'Failed to delete file' });
   }
 });

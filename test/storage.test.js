@@ -8,6 +8,7 @@ const {
   getB2Config,
   isB2Enabled,
   uploadFile,
+  isAutoCleanupObject,
   listFiles,
   deleteFile,
   getDownloadUrl
@@ -106,6 +107,7 @@ test('uploadFile streams the local file to the configured bucket/key and returns
     assert.equal(seenInput.Key, 'videos/hello.mp4');
     assert.equal(seenInput.ContentLength, Buffer.byteLength('hello world'));
     assert.equal(seenInput.ContentType, 'application/octet-stream');
+    assert.deepEqual(seenInput.Metadata, { 'auto-cleanup': 'true' });
 
     await fs.unlink(tmpFile);
   });
@@ -180,10 +182,31 @@ test('deleteFile sends a DeleteObjectCommand for the given key', async () => {
   });
 });
 
-test('listFiles/deleteFile throw when B2 is not configured', async () => {
+test('isAutoCleanupObject is true only for objects carrying the auto-cleanup metadata marker', async () => {
+  await withB2Env({
+    B2_KEY_ID: 'id',
+    B2_APPLICATION_KEY: 'key',
+    B2_BUCKET: 'my-bucket',
+    B2_ENDPOINT: 'https://example.com'
+  }, async () => {
+    let seenInput = null;
+    const tagged = fakeClient(async (command) => {
+      seenInput = command.input;
+      return { Metadata: { 'auto-cleanup': 'true' } };
+    });
+    assert.equal(await isAutoCleanupObject('ours.mp4', { client: tagged }), true);
+    assert.deepEqual(seenInput, { Bucket: 'my-bucket', Key: 'ours.mp4' });
+
+    assert.equal(await isAutoCleanupObject('theirs.zip', { client: fakeClient(async () => ({ Metadata: {} })) }), false);
+    assert.equal(await isAutoCleanupObject('legacy.mp4', { client: fakeClient(async () => ({})) }), false);
+  });
+});
+
+test('listFiles/deleteFile/isAutoCleanupObject throw when B2 is not configured', async () => {
   await withB2Env({}, async () => {
     await assert.rejects(() => listFiles(), /not configured/);
     await assert.rejects(() => deleteFile('key'), /not configured/);
+    await assert.rejects(() => isAutoCleanupObject('key'), /not configured/);
   });
 });
 

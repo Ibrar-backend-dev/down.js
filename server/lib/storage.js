@@ -44,6 +44,9 @@ function getS3Client() {
   return cachedClient;
 }
 
+// Lets the cleanup sweep tell our uploads apart from anything else in the bucket.
+const AUTO_CLEANUP_METADATA_KEY = 'auto-cleanup';
+
 // Uploads a local file to B2 under `key` as a single streamed PutObject
 // (well within B2/S3's 5GB single-PUT limit for any realistic downloaded
 // video) and returns the object's size.
@@ -61,10 +64,22 @@ async function uploadFile(localFilePath, key, options = {}) {
     Key: key,
     Body: fs.createReadStream(localFilePath),
     ContentLength: stats.size,
-    ContentType: 'application/octet-stream'
+    ContentType: 'application/octet-stream',
+    Metadata: { [AUTO_CLEANUP_METADATA_KEY]: 'true' }
   }));
 
   return { key, size: stats.size };
+}
+
+async function isAutoCleanupObject(key, options = {}) {
+  const config = getB2Config();
+  if (!config) {
+    throw new Error('B2 storage is not configured');
+  }
+  const client = options.client || getS3Client();
+  const { HeadObjectCommand } = require('@aws-sdk/client-s3');
+  const result = await client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key }));
+  return result.Metadata?.[AUTO_CLEANUP_METADATA_KEY] === 'true';
 }
 
 // Returns [{ name, size, createdAt, modifiedAt }] to match the shape the
@@ -145,6 +160,7 @@ module.exports = {
   isB2Enabled,
   getS3Client,
   uploadFile,
+  isAutoCleanupObject,
   listFiles,
   deleteFile,
   getDownloadUrl

@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { extractQualities, formatFilesizeMb, formatQualityLabel, getResolutionLabel, formatDuration } = require('../server/lib/qualities');
+const { extractQualities, keepSizedQualities, extractBestAudio, formatFilesizeMb, formatQualityLabel, getResolutionLabel, formatDuration } = require('../server/lib/qualities');
 
 test('extractQualities deduplicates by resolution, keeping the highest-bitrate variant', () => {
   const formats = [
@@ -10,9 +10,77 @@ test('extractQualities deduplicates by resolution, keeping the highest-bitrate v
     { format_id: 'hls-2', ext: 'mp4', width: 854, height: 480, tbr: 500, url: 'https://cdn.example.com/hls-2.mp4' }
   ];
   assert.deepEqual(extractQualities(formats), [
-    { format_id: 'dash-1', ext: 'mp4', width: 1280, height: 720, label: 'HD', quality: '720p', filesize: null, url: 'https://cdn.example.com/dash-1.mp4' },
-    { format_id: 'hls-2', ext: 'mp4', width: 854, height: 480, label: 'SD', quality: '480p', filesize: null, url: 'https://cdn.example.com/hls-2.mp4' }
+    { format_id: 'dash-1', ext: 'mp4', width: 1280, height: 720, label: 'HD', quality: '720p', direct: true, videoOnly: false, filesize: null, url: 'https://cdn.example.com/dash-1.mp4' },
+    { format_id: 'hls-2', ext: 'mp4', width: 854, height: 480, label: 'SD', quality: '480p', direct: true, videoOnly: false, filesize: null, url: 'https://cdn.example.com/hls-2.mp4' }
   ]);
+});
+
+test('extractQualities prefers a direct file over a higher-bitrate HLS playlist of the same quality', async () => {
+  // Real Reddit data: the HLS playlist reports a higher bitrate at 270p, but
+  // its HEAD size is the playlist text (171 bytes), not the video.
+  const formats = [
+    { format_id: 'dash-7', ext: 'mp4', protocol: 'https', width: 270, height: 480, vcodec: 'avc1', acodec: 'none', tbr: 242.7, url: 'https://v.redd.it/x/CMAF_270.mp4' },
+    { format_id: 'hls-359', ext: 'mp4', protocol: 'm3u8_native', width: 270, height: 480, vcodec: 'avc1', acodec: 'none', tbr: 359.6, url: 'https://v.redd.it/x/CMAF_270.m3u8' }
+  ];
+  const [q] = extractQualities(formats);
+  assert.equal(q.format_id, 'dash-7');
+  assert.equal(q.direct, true);
+  assert.equal(q.videoOnly, true);
+});
+
+test('extractQualities still uses an HLS playlist when it is the only variant, marked as not direct', () => {
+  const formats = [{ format_id: 'hls-229', ext: 'mp4', protocol: 'm3u8_native', width: 426, height: 240, vcodec: 'avc1', acodec: 'none', tbr: 300 }];
+  const [q] = extractQualities(formats);
+  assert.equal(q.quality, '240p');
+  assert.equal(q.direct, false);
+});
+
+test('extractQualities excludes storyboard thumbnails that report dimensions but no video', () => {
+  const formats = [
+    { format_id: 'sb0', ext: 'mhtml', protocol: 'mhtml', width: 320, height: 180, vcodec: 'none', acodec: 'none' },
+    { format_id: '269', ext: 'mp4', width: 256, height: 144, vcodec: 'avc1', acodec: 'none' }
+  ];
+  assert.deepEqual(extractQualities(formats).map((q) => q.format_id), ['269']);
+});
+
+test('keepSizedQualities keeps only qualities that have a real size', () => {
+  // Real Pinterest data: only the direct 640p mp4 has a size; 480p/360p/240p are HLS-only.
+  const qualities = [
+    { format_id: 'V_720P', quality: '640p', filesize: 2.2 },
+    { format_id: 'V_HLSV4-534', quality: '480p', filesize: null },
+    { format_id: 'V_HLSV4-379', quality: '360p', filesize: null },
+    { format_id: 'V_HLSV4-241', quality: '240p', filesize: null }
+  ];
+  assert.deepEqual(keepSizedQualities(qualities).map((q) => q.format_id), ['V_720P']);
+});
+
+test('keepSizedQualities still returns the best quality when none has a size', () => {
+  const qualities = [
+    { format_id: '270', quality: '1080p', filesize: null },
+    { format_id: '232', quality: '720p', filesize: null }
+  ];
+  assert.deepEqual(keepSizedQualities(qualities).map((q) => q.format_id), ['270']);
+  assert.deepEqual(keepSizedQualities([]), []);
+});
+
+test('extractBestAudio picks the audio-only track a download would merge, preferring direct files', () => {
+  const formats = [
+    { format_id: 'hls-6-audio_0', ext: 'mp4', protocol: 'm3u8_native', vcodec: 'none', acodec: 'mp4a', tbr: 200 },
+    { format_id: 'dash-12', ext: 'm4a', protocol: 'https', vcodec: 'none', acodec: 'mp4a.40.2', tbr: 68.2, url: 'https://v.redd.it/x/CMAF_AUDIO_64.mp4' },
+    { format_id: 'dash-13', ext: 'm4a', protocol: 'https', vcodec: 'none', acodec: 'mp4a.40.2', tbr: 131.9, filesize: 190_000, url: 'https://v.redd.it/x/CMAF_AUDIO_128.mp4' },
+    { format_id: 'dash-6', ext: 'mp4', protocol: 'https', width: 220, height: 392, vcodec: 'avc1', acodec: 'none', tbr: 117 }
+  ];
+  assert.deepEqual(extractBestAudio(formats), {
+    format_id: 'dash-13',
+    direct: true,
+    filesize: 0.18,
+    url: 'https://v.redd.it/x/CMAF_AUDIO_128.mp4'
+  });
+});
+
+test('extractBestAudio returns null when there is no separate audio track', () => {
+  assert.equal(extractBestAudio([{ format_id: 'h264_540p', vcodec: 'h264', acodec: 'aac', width: 576, height: 1024 }]), null);
+  assert.equal(extractBestAudio(null), null);
 });
 
 test('extractQualities dedupes by the quality label (short edge), not exact width x height, keeping the highest-bitrate variant', () => {

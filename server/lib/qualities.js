@@ -9,10 +9,9 @@
 // deduping by exact dimensions would let both slip through as if they were
 // different qualities. Audio-only or unknown-resolution formats are
 // excluded, so every remaining entry is a real, distinct choice a caller
-// could ask for. When a quality has multiple variants, the highest-bitrate
-// one is kept (an HLS manifest/segment reference reporting no bitrate loses
-// to a real fallback/dash format that does), since that's the best real
-// stream available at that quality. Pure/sync - callers needing a real
+// could ask for. When a quality has multiple variants, a direct file beats an
+// HLS/DASH manifest of the same stream (see isPreferredVariant), then the
+// highest bitrate wins. Pure/sync - callers needing a real
 // filesize fetch it separately (see server/lib/formatSize.js), since that
 // requires a network request.
 function extractQualities(formats) {
@@ -24,23 +23,26 @@ function extractQualities(formats) {
     if (!format || typeof format.width !== 'number' || typeof format.height !== 'number') {
       continue;
     }
+    // Storyboard thumbnails (e.g. YouTube's sb* formats) have dimensions but no video.
+    if (format.vcodec === 'none') continue;
     const shortEdge = getShortEdge(format.width, format.height);
     if (!shortEdge || shortEdge <= 0) continue;
 
-    const bitrate = typeof format.tbr === 'number' ? format.tbr : 0;
     const existing = bestByQuality.get(shortEdge);
-    if (!existing || bitrate > existing.bitrate) {
-      bestByQuality.set(shortEdge, { format, bitrate });
+    if (!existing || isPreferredVariant(format, existing)) {
+      bestByQuality.set(shortEdge, format);
     }
   }
 
-  const qualities = Array.from(bestByQuality.values()).map(({ format }) => ({
+  const qualities = Array.from(bestByQuality.values()).map((format) => ({
     format_id: format.format_id,
     ext: format.ext,
     width: format.width,
     height: format.height,
     label: getResolutionLabel(format.width, format.height),
     quality: formatQualityLabel(format),
+    direct: isDirectFile(format),
+    videoOnly: format.acodec === 'none',
     // yt-dlp's own reported real filesize (e.g. TikTok provides this
     // directly - no network call needed, and it must be tried first: a
     // live HEAD request to TikTok's CDN fails without its session cookies,
@@ -53,6 +55,46 @@ function extractQualities(formats) {
 
   qualities.sort((a, b) => getShortEdge(b.width, b.height) - getShortEdge(a.width, a.height));
   return qualities;
+}
+
+// Drops qualities with no real size, but keeps the best one if none has a size so the list is never empty.
+function keepSizedQualities(qualities) {
+  const sized = qualities.filter((q) => typeof q.filesize === 'number');
+  return sized.length > 0 ? sized : qualities.slice(0, 1);
+}
+
+// The audio track `bestaudio` would merge into a video-only download, picked by the same rule.
+function extractBestAudio(formats) {
+  if (!Array.isArray(formats)) return null;
+  let best = null;
+  for (const format of formats) {
+    if (!format || format.vcodec !== 'none' || !format.acodec || format.acodec === 'none') continue;
+    if (!best || isPreferredVariant(format, best)) best = format;
+  }
+  if (!best) return null;
+  return {
+    format_id: best.format_id,
+    direct: isDirectFile(best),
+    filesize: formatFilesizeMb(best),
+    url: best.url
+  };
+}
+
+// A single downloadable file, not an HLS/DASH manifest whose own bytes are just a playlist.
+function isDirectFile(format) {
+  if (Array.isArray(format.fragments) && format.fragments.length > 0) return false;
+  if (format.protocol) return /^https?$/i.test(format.protocol);
+  return typeof format.url === 'string' && !/\.(m3u8|mpd)(\?|$)/i.test(format.url);
+}
+
+// Direct files beat manifests (a live size check only works on them), then higher bitrate wins.
+// Mirrors POST /api/download's `-S res,proto,tbr` sort so both endpoints pick the same file.
+function isPreferredVariant(candidate, existing) {
+  const candidateDirect = isDirectFile(candidate);
+  const existingDirect = isDirectFile(existing);
+  if (candidateDirect !== existingDirect) return candidateDirect;
+  const bitrate = (format) => (typeof format.tbr === 'number' ? format.tbr : 0);
+  return bitrate(candidate) > bitrate(existing);
 }
 
 // Only yt-dlp's exact `filesize` counts as real - `filesize_approx` is a
@@ -140,6 +182,9 @@ function formatDuration(seconds) {
 
 module.exports = {
   extractQualities,
+  keepSizedQualities,
+  extractBestAudio,
+  isDirectFile,
   formatFilesizeMb,
   formatQualityLabel,
   getResolutionLabel,

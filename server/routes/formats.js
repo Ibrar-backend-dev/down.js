@@ -81,14 +81,12 @@ router.get('/', async (req, res) => {
           });
 
         } catch (parseError) {
-          console.error('Error parsing formats:', parseError);
           res.status(500).json({ 
             error: 'Failed to parse format information',
             details: parseError.message 
           });
         }
       } else {
-        console.error('yt-dlp formats error:', error);
         res.status(500).json({ 
           error: 'Failed to get format information',
           details: error 
@@ -97,7 +95,6 @@ router.get('/', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Format extraction error:', error);
     res.status(500).json({ 
       error: 'Failed to extract format information',
       details: error.message 

@@ -55,6 +55,7 @@ Copy `.env.example` to `.env` and adjust as needed.
 | `NODE_ENV` | `development` \| `production` - affects logging verbosity | `development` |
 | `DOWNLOADS_DIR` | Local-storage fallback: where files are written/read/deleted when B2 (below) isn't configured | `./downloads` |
 | `AUTO_CLEANUP_DELAY_MS` | How long a finished download stays fetchable before being auto-deleted | `45000` |
+| `CLEANUP_SWEEP_INTERVAL_MS` | B2 only: how often the background sweep checks the bucket for leftover files (see below) | `60000` |
 
 `.env` is gitignored and loaded automatically via Node's `--env-file-if-exists` flag - no extra setup needed. For production, see `.env.production.example` (covers why `PORT` usually shouldn't be set on PaaS hosts, and why local disk storage is risky there).
 
@@ -69,6 +70,8 @@ By default, `POST /api/download` writes files to `DOWNLOADS_DIR` on local disk. 
 | `B2_BUCKET` | Bucket name |
 | `B2_ENDPOINT` | Bucket's S3-compatible endpoint, e.g. `https://s3.us-west-002.backblazeb2.com` |
 | `B2_REGION` | Defaults to `us-west-002` if unset |
+
+**Cleanup on B2.** Each download schedules its own delete `AUTO_CLEANUP_DELAY_MS` after the response, but that timer only lives in the server's memory, so a restart, redeploy or crash inside the window loses it. A background sweep (every `CLEANUP_SWEEP_INTERVAL_MS`) catches those: it deletes any file it has seen in the bucket for longer than `AUTO_CLEANUP_DELAY_MS`, so a leftover is gone within about two sweep intervals, including after a restart. The sweep only deletes objects this server uploaded (they carry `auto-cleanup` metadata), so anything else in the bucket is left alone. Files uploaded before this marker existed aren't swept.
 
 ## Development
 
@@ -97,7 +100,7 @@ npm start
 - `POST /api/download` - Synchronous: downloads `{ url, quality, audioOnly, format }` and responds only once finished.
   - `200` → `{ downloadId, platform, contentType, title, quality, fileSize, storage, downloadUrl }` - `quality`/`fileSize` are read from the actual finished file (`null` quality for audio-only), `downloadUrl` is a relative path to `GET /api/download/:filename` (or a presigned B2 URL if B2 is configured), `platform` is `null` outside the 5 platforms `/link` supports.
   - `400` → missing/invalid URL. `502` → yt-dlp failed, or the B2 upload failed after the download itself succeeded.
-  - The finished file is deleted automatically `AUTO_CLEANUP_DELAY_MS` (default 45s) after this response.
+  - The finished file is deleted automatically `AUTO_CLEANUP_DELAY_MS` (default 45s) after this response. On B2, if a restart interrupts that, the background sweep removes it shortly after (see "Cleanup on B2" above).
 - `GET /api/download/:filename` - Fetch a finished download's bytes. `404` once the auto-cleanup window has passed.
 - `GET /api/download/list` - List downloaded files
 - `DELETE /api/download/:filename` - Delete a downloaded file
